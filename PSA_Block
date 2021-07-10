@@ -1,0 +1,94 @@
+import math
+import torch
+import torch.nn as nn
+import numpy as np
+
+
+class ChannelOnlyAttention(nn.Module):
+    def __init__(self, inplanes):
+        super(ChannelOnlyAttention, self).__init__()
+        self.planes = inplanes // 2
+
+        self.conv_v = nn.Conv2d(inplanes, self.planes, kernel_size=1, stride=1, padding=0, bias=False)
+        self.conv_q = nn.Conv2d(inplanes, 1, kernel_size=1, stride=1, padding=0, bias=False)
+
+        self.conv_z = nn.Conv2d(self.planes, inplanes, kernel_size=1, stride=1, padding=0, bias=False)
+        self.LN = nn.LayerNorm([inplanes, 1, 1])
+        self.sigmoid = nn.Sigmoid()
+
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        batch_size, num_channels, H, W = x.size()
+
+        residual = x
+
+        v = self.conv_v(x)
+        v = v.view(batch_size, -1, H * W)
+
+        q = self.conv_q(x)
+        q = q.view(batch_size, 1, H * W)
+        q = self.softmax(q)
+        q = q.permute(0, 2, 1)
+
+        z = torch.matmul(v, q)
+        z = z.unsqueeze(dim=-1)
+        z = self.conv_z(z)
+        z = self.LN(z)
+        z = self.sigmoid(z)
+
+        x = residual * z
+
+        return x
+
+
+class SpatialOnlyAttention(nn.Module):
+    def __init__(self, inplanes):
+        super(SpatialOnlyAttention, self).__init__()
+        self.planes = inplanes // 2
+
+        self.conv_q = nn.Conv2d(inplanes, self.planes, kernel_size=1, stride=1, padding=0, bias=False)
+        self.avg_pool = nn.AdaptiveMaxPool2d((1, 1))
+        self.softmax = nn.Softmax(dim=-1)
+
+        self.conv_v = nn.Conv2d(inplanes, self.planes, kernel_size=1, stride=1, padding=0, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        batch_size, num_channels, H, W = x.size()
+
+        residual = x
+
+        q = self.conv_q(x)
+        q = self.avg_pool(q)
+        q = q.view(batch_size, -1, 1)
+        q = q.permute(0, 2, 1)
+        q = self.softmax(q)
+
+        v = self.conv_v(x)
+        v = v.view(batch_size, -1, H * W)
+
+        out = torch.matmul(q, v)
+        out = out.view(batch_size, -1, H, W)
+        out = self.sigmoid(out)
+
+        x = out * residual
+        return x
+
+
+class PSABlock(nn.Module):
+    def __init__(self, inplanes):
+        super(PSABlock, self).__init__()
+        self.channel_atten = ChannelOnlyAttention(inplanes)
+        self.spatial_atten = SpatialOnlyAttention(inplanes)
+
+    def forward(self, x):
+        out = self.channel_atten(x) + self.spatial_atten(x)
+        return out
+
+
+if __name__ == '__main__':
+    x = torch.randn((3, 32, 8, 8))
+    model = PSABlock(32)
+    out = model(x)
+    print(out.size())
